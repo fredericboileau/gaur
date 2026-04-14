@@ -6,6 +6,7 @@ import (
 	// "log"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -149,12 +150,14 @@ func recurse(pkgnames []string, types []DepType) (
 	updatePkgMap := func(pkg AurPkg, pkgmap map[string]ProviderInfo) {
 		for _, provSpec := range pkg.Provides {
 			parts := strings.SplitN(provSpec, "=", 2)
-			switch len(parts) {
-			case 2:
-				// pkg.Name = gcc provSpec cc=14 => pkgmap["cc"] = ProviderInfo{Name: "gcc", Version: "14"}
-				pkgmap[parts[0]] = ProviderInfo{Name: pkg.Name, Version: parts[1]}
-			case 1:
-				pkgmap[parts[0]] = ProviderInfo{Name: pkg.Name, Version: ""}
+			if parts[0] != pkg.Name {
+				switch len(parts) {
+				case 2:
+					// pkg.Name = gcc provSpec cc=14 => pkgmap["cc"] = ProviderInfo{Name: "gcc", Version: "14"}
+					pkgmap[parts[0]] = ProviderInfo{Name: pkg.Name, Version: parts[1]}
+				case 1:
+					pkgmap[parts[0]] = ProviderInfo{Name: pkg.Name, Version: ""}
+				}
 			}
 		}
 
@@ -266,6 +269,9 @@ func graph(
 
 	}
 
+	dag = make(map[string]map[string]DepType)
+	dagForeign = make(map[string]map[string]DepType)
+
 	for name, deps := range pkgdeps {
 		for _, dep := range deps {
 			depName, depOp, depReq, err := parseDepSpec(dep.Spec)
@@ -373,18 +379,121 @@ func prune(dag map[string]map[string]DepType, installed []string) (removed []str
 
 }
 
-//
-// func solve(installed []string, verify bool, provides bool, types []DepType, targets []string) (
-// 	results map[string]AurPkg,
-// 	dag map[string]map[string]DepType,
-// 	dag_foreign map[string]map[string]DepType) {
-//
-// 	results, pkgdeps, pkgmap := recurse(targets, types)
-// 	dag, dag_foreign := graph(provides, verify, results, pkgdeps, pkgmap)
-//
-// 	return results, dag, dag_foreign
-// }
+func solve(targets []string, installed []string, verify bool, provides bool, types []DepType) (
+	results map[string]AurPkg,
+	dag map[string]map[string]DepType,
+	dagForeign map[string]map[string]DepType,
+	err error) {
+
+	results, pkgdeps, pkgmap, err := recurse(targets, types)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("recurse: %w", err)
+	}
+	dag, dagForeign, err = graph(provides, verify, results, pkgdeps, pkgmap)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("graph: %w", err)
+	}
+	removed := prune(dag, installed)
+	for _, pkgname := range removed {
+		delete(results, pkgname)
+	}
+
+	return results, dag, dagForeign, nil
+}
+
+func makePairs(
+	results map[string]AurPkg,
+	dag map[string]map[string]DepType,
+	pkgbase bool,
+	reverse bool) (pairs [][2]string) {
+
+	resolve := func(pkg AurPkg) string {
+		if pkgbase {
+			if pkg.PackageBase != nil {
+				return *pkg.PackageBase
+			}
+			return "-"
+		}
+		return pkg.Name
+	}
+
+	seen := make(map[[2]string]struct{})
+
+	for _, pkg := range results {
+		id := resolve(pkg)
+		for depId := range dag[pkg.Name] {
+			if pkgbase {
+				if depPkg, ok := results[depId]; ok {
+					depId = resolve(depPkg)
+				} else {
+					depId = "-"
+				}
+			}
+			var pair [2]string
+			if reverse {
+				pair = [2]string{id, depId}
+			} else {
+				pair = [2]string{depId, id}
+			}
+
+			if _, ok := seen[pair]; !ok {
+				seen[pair] = struct{}{}
+				pairs = append(pairs, pair)
+			}
+		}
+	}
+	return pairs
+}
+
+// TODO show all add parameter to makePairs to take into account dagForeign
+// TODO  make outputMode an enum
+func run(
+	targets []string,
+	installed []string,
+	verify bool,
+	provides bool,
+	types []DepType,
+	pkgName bool,
+	showAll bool,
+	outputMode string,
+	reverse bool,
+) error {
+
+	results, dag, _, err := solve(targets, installed, verify, provides, types)
+	if err != nil {
+		return err
+	}
+
+	if outputMode == "pairs" {
+		// TODO add foreign dag and show all
+		pkgBase := !(pkgName || showAll)
+		reverse = false
+		pairs := makePairs(results, dag, pkgBase, reverse)
+		for _, pair := range pairs {
+			fmt.Printf("%s\t%s\n", pair[0], pair[1])
+		}
+	}
+
+	return nil
+}
 
 func main() {
+	targets := os.Args[1:]
+	if len(targets) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: gaur <pkgname...>")
+		os.Exit(1)
+	}
+	installed := []string{}
+	verify := true
+	provides := true
+	types := []DepType{Depends, MakeDepends, CheckDepends}
+	pkgName := true
+	showAll := false
+	outputMode := "pairs"
+	reverse := true
+	if err := run(targets, installed, verify, provides, types, pkgName, showAll, outputMode, reverse); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 }
