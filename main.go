@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	// "log"
+	"flag"
 	"net/http"
 	"net/url"
 	"os"
@@ -478,22 +479,45 @@ func run(
 }
 
 func main() {
-	targets := os.Args[1:]
+	outputMode := flag.String("output-mode", "pairs", "MODE pairs|table|json|jsonl")
+	noDepends := flag.Bool("no-depends", false, "don't include depends")
+	noMakedepends := flag.Bool("no-makedepends", false, "don't include makedepends")
+	noCheckdepends := flag.Bool("no-checkdepends", false, "don't include checkdepends")
+	optdepends := flag.Bool("optdepends", false, "include optdepends")
+	reverse := flag.Bool("reverse", false, "reverse dependency")
+	assumeInstalled := flag.String("assume-installed", "", "selectively remove dependencies, separate packages with a comma")
+	noProvides := flag.Bool("no-provides", false, "disable support for virtual dependencies")
+	pkgname := flag.Bool("pkgname", false, "print package name instead of package base")
+	verify := flag.Bool("verify", false, "verify versions")
+	flag.Parse()
+
+	targets := flag.Args()
 	if len(targets) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: gaur <pkgname...>")
-		os.Exit(1)
-	}
-	installed := []string{}
-	verify := true
-	provides := true
-	types := []DepType{Depends, MakeDepends, CheckDepends}
-	pkgName := true
-	showAll := false
-	outputMode := "pairs"
-	reverse := true
-	if err := run(targets, installed, verify, provides, types, pkgName, showAll, outputMode, reverse); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "usage: gaur [flags] <pkgname...>")
 		os.Exit(1)
 	}
 
+	var installed []string
+	if *assumeInstalled != "" {
+		installed = strings.Split(*assumeInstalled, ",")
+	}
+
+	types := []DepType{}
+	if !*noDepends {
+		types = append(types, Depends)
+	}
+	if !*noMakedepends {
+		types = append(types, MakeDepends)
+	}
+	if !*noCheckdepends {
+		types = append(types, CheckDepends)
+	}
+	if *optdepends {
+		types = append(types, OptDepends)
+	}
+
+	if err := run(targets, installed, *verify, !*noProvides, types, *pkgname, false, *outputMode, *reverse); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
